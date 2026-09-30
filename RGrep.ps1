@@ -1,5 +1,3 @@
-# RGrep.ps1
-#
 <#
 Copyright 2026 Sevetech
 
@@ -15,9 +13,12 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 #>
-# usage: .\RGrep.ps1 -pattern "your_regex_pattern_here"
+# usage: .\RGrep.ps1 -pattern "your_regex_pattern_here" [-NoIgnore]
+# Respects .gitignore, .ignore, .rgignore, .git/info/exclude and the global gitignore.
+# -NoIgnore searches everything, ignore files included (hidden files stay skipped).
 param(
-    [string]$pattern
+    [Parameter(Mandatory)][string]$pattern,
+    [switch]$NoIgnore
 )
 
 # Ensure ripgrep is installed and accessible
@@ -27,11 +28,15 @@ if (-not(Get-Command "rg" -ErrorAction SilentlyContinue)) {
 }
 
 # Search for the pattern using ripgrep
-$rgOutput = rg --column --line-number --no-heading --color never $pattern -g "*" .
+# Note: an explicit -g glob overrides ignore files, so none is passed here.
+# --no-require-git applies .gitignore rules even when the folder is not a git repository.
+$rgArgs = @('--column', '--line-number', '--no-heading', '--color', 'never', '--no-require-git')
+if ($NoIgnore) { $rgArgs += '--no-ignore' }
+$rgOutput = rg @rgArgs -- $pattern .
 
 # Process the output to match the desired format
 $rgOutput | ForEach-Object {
-    $splitLine = $_ -split ':'
+    $splitLine = $_ -split ':', 4   # limit 4 so colons inside the matched text are kept
     $filePath = $splitLine[0]
     $line = $splitLine[1]
     $column = $splitLine[2]
@@ -39,3 +44,10 @@ $rgOutput | ForEach-Object {
     # Correctly format the output
     "${filePath}:$($line):$($column):$textLine"
 }
+
+
+
+
+
+
+
