@@ -43,3 +43,9 @@ Keys       F5 run script   Ctrl-W switch pane focus   gt / gT next / previous bu
 The current version has known limitations. The terminal pane uses plain pipes instead of a pseudo-terminal, so full-screen or prompt-driven programs (vim, htop, interactive REPLs) do not work correctly, while ordinary commands and scripts do. Tabs are converted to two spaces on load. Dot-repeat, text objects such as `diw` and `ci"`, named registers, marks, macros, and split windows are not implemented. Undo is snapshot-based and is intended for files of moderate size.
 
 Planned work depends on feedback and may include a real terminal through the optional `node-pty` package, text objects, dot-repeat, and a single-executable build. Issues and suggestions are welcome.
+
+
+## HUD
+
+A keystroke heads-up display can be switched on and off with F2 or :hud [on|off]. When enabled, the last keys typed are shown as keycaps at the right end of the bottom line (for example 2 d w), and they fade out 2.5 seconds after the last keystroke. Each keycap is colored by the mode that was active when the key was pressed: blue for normal, green for insert, magenta for visual, yellow for command, and cyan for search. :hud N turns the display on and limits it to the last N keys (1 to 20, default 8). Keys typed into the terminal pane are never recorded.
+

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+
 /*
  * Copyright 2026 Sevetech
  *
@@ -16,7 +17,6 @@
  */
 
 'use strict';
-
 // minivim.js - a tiny vim clone with a built-in terminal pane, tuned for PowerShell.
 // Zero dependencies. Usage: node minivim.js [file.ps1]
 
@@ -36,6 +36,7 @@ const S = {
   reg: { text: [], lw: false }, undo: [], redo: [],
   anchor: null, vline: false, search: '',
   errs: [], errI: -1, syn: null, // syn: null = auto by extension
+  hud: false, keys: [], hudMax: 8, // keystroke heads-up display: on/off, recent keys, max shown
 };
 
 const T = {
@@ -498,6 +499,7 @@ function attach(p, onDone) {
   p.on('close', (code) => {
     if (code) T.lines.push(`[exit ${code}]`);
     T.partial = false; T.proc = null;
+    if (onDone) onDone(code);
     scanErrors();
     render();
   });
@@ -508,7 +510,7 @@ function splitArgs(s) {
 }
 
 // Run the current buffer as a script. Saves first; output lands in the terminal pane.
-function runFile(args) {
+function runFile(args, mode) {   // mode: undefined = run, 'whatif' = dry run, 'confirm' = prompt per action
   if (!S.file) { S.msg = 'No file name (use :w name.ps1 first)'; return; }
   if (T.proc) { S.msg = 'A process is still running (focus the pane, Ctrl-C)'; return; }
   const ps = psExe();
@@ -516,10 +518,28 @@ function runFile(args) {
   if (S.dirty && !save(S.file)) return;
   const abs = path.resolve(S.file);
   T.open = true; T.partial = false;
-  T.lines.push(`${shortCwd()}$ run ${S.file}${args ? ' ' + args : ''}`);
+  const tag = mode === 'whatif' ? 'dryrun -WhatIf' : mode === 'confirm' ? 'dryrun -Confirm' : 'run';
+  T.lines.push(`${shortCwd()}$ ${tag} ${S.file}${args ? ' ' + args : ''}`);
   T.runStart = T.lines.length;
   S.errs = []; S.errI = -1;
-  attach(spawn(ps, ['-NoLogo', '-NoProfile', ...EP, '-File', abs, ...splitArgs(args)], { cwd: T.cwd, env: menv() }));
+  let argv;
+  if (mode) {
+    // The preference variable is inherited by the script and by every cmdlet it calls,
+    // so scripts do not need [CmdletBinding(SupportsShouldProcess)] for this to work.
+    const pre = mode === 'whatif' ? '$WhatIfPreference = $true; ' : "$ConfirmPreference = 'Low'; ";
+    argv = ['-NoLogo', '-NoProfile', ...EP, '-Command', `${pre}& '${abs.replace(/'/g, "''")}' ${args || ''}`];
+  } else {
+    argv = ['-NoLogo', '-NoProfile', ...EP, '-File', abs, ...splitArgs(args)];
+  }
+  attach(spawn(ps, argv, { cwd: T.cwd, env: menv() }), mode === 'whatif' ? whatIfSummary : undefined);
+  if (mode === 'confirm') T.focus = true;   // answers to the prompts are typed in the pane
+}
+
+function whatIfSummary() {
+  const n = T.lines.slice(T.runStart || 0).filter((l) => /^What if:/i.test(l)).length;
+  T.lines.push(n
+    ? `[dry run finished: ${n} action(s) simulated, nothing was changed by those; native commands and .NET calls are not simulated]`
+    : '[dry run finished: no "What if:" lines seen - the script may not use cmdlets that support -WhatIf, so it may have no preview]');
 }
 
 // PowerShell reports locations as "At <file>:<line> char:<col>".
@@ -648,7 +668,19 @@ function exCmd(c) {
       return;
     case 'termclose': case 'tclose':
       T.open = false; T.focus = false; return;
+    case 'hud':
+      if (/^\d+$/.test(arg)) {
+        toggleHud(true);
+        S.hudMax = Math.max(1, Math.min(20, parseInt(arg, 10)));
+        S.msg = `HUD on, last ${S.hudMax} key(s)`;
+      } else toggleHud(arg === 'on' ? true : arg === 'off' ? false : undefined);
+      return;
     case 'run': runFile(arg); return;
+    case 'dryrun': case 'dry': {
+      const m = /^-(whatif|confirm)(?:\s+(.*))?$/i.exec(arg);
+      runFile(m ? m[2] : arg, m && m[1].toLowerCase() === 'confirm' ? 'confirm' : 'whatif');
+      return;
+    }
     case 'cn': errJump(1); return;
     case 'cp': errJump(-1); return;
     case 'syntax': case 'syn': S.syn = arg === 'off' ? false : arg === 'on' ? true : null; return;
@@ -828,7 +860,9 @@ function cmdKey(k) {
 
 function onKey(k) {
   if (S.mode !== 'COMMAND' && S.mode !== 'SEARCH') S.msg = '';
-  if (k === 'F5') { if (S.mode === 'INSERT') { S.mode = 'NORMAL'; clamp(); } runFile(''); return; }
+  if (k === 'F2') { toggleHud(); return; }
+  if (S.hud && !(T.focus && T.open)) hudPush(k);   // pane keystrokes are never recorded
+  if (k === 'F5' || k === 'F6') { if (S.mode === 'INSERT') { S.mode = 'NORMAL'; clamp(); } runFile('', k === 'F6' ? 'whatif' : undefined); return; }
   if (k === 'C-w') { if (T.open) T.focus = !T.focus; else S.msg = 'No terminal open (:term)'; return; }
   if (T.focus && T.open) return termKey(k);
   switch (S.mode) {
@@ -842,7 +876,7 @@ function onKey(k) {
 // ---------------------------------------------------------------- input parsing
 function parseKeys(s) {
   const ks = [];
-  const map = { A: 'UP', B: 'DOWN', C: 'RIGHT', D: 'LEFT', H: 'HOME', F: 'END', '3~': 'DEL', '1~': 'HOME', '4~': 'END', '7~': 'HOME', '8~': 'END', '15~': 'F5' };
+  const map = { A: 'UP', B: 'DOWN', C: 'RIGHT', D: 'LEFT', H: 'HOME', F: 'END', '3~': 'DEL', '1~': 'HOME', '4~': 'END', '7~': 'HOME', '8~': 'END', '15~': 'F5', '17~': 'F6', Q: 'F2', '12~': 'F2' };
   for (let i = 0; i < s.length;) {
     const c = s[i];
     if (c === '\x1b') {
@@ -868,6 +902,48 @@ function parseKeys(s) {
 }
 
 // ---------------------------------------------------------------- rendering
+// ---------------------------------------------------------------- keystroke HUD
+const HUD_NAMES = { ESC: 'Esc', ENTER: 'Enter', BS: 'Bksp', TAB: 'Tab', DEL: 'Del', UP: 'Up', DOWN: 'Down',
+  LEFT: 'Left', RIGHT: 'Right', HOME: 'Home', END: 'End', ' ': 'Spc', UNKNOWN: '?' };
+// Keycap colours by the mode that was active when the key was pressed.
+const HUD_COLORS = { NORMAL: '\x1b[44;97m', INSERT: '\x1b[42;30m', VISUAL: '\x1b[45;97m', COMMAND: '\x1b[43;30m', SEARCH: '\x1b[46;30m' };
+let hudTimer = null;
+
+function keyLabel(k) {
+  if (HUD_NAMES[k]) return HUD_NAMES[k];
+  return k.startsWith('C-') ? '^' + k.slice(2).toUpperCase() : k;
+}
+
+function toggleHud(on) {
+  S.hud = on === undefined ? !S.hud : on;
+  S.keys = [];
+  S.msg = 'HUD ' + (S.hud ? 'on' : 'off');
+}
+
+// Keeps the last S.hudMax keys (:hud N); they fade out 2.5 s after the final keystroke.
+function hudPush(k) {
+  S.keys.push({ t: keyLabel(k), m: S.mode });
+  if (S.keys.length > S.hudMax) S.keys.splice(0, S.keys.length - S.hudMax);
+  clearTimeout(hudTimer);
+  hudTimer = setTimeout(() => { S.keys = []; render(); }, 2500);
+  if (hudTimer.unref) hudTimer.unref();
+}
+
+// Right-aligns the recent keys as inverse-video keycaps on the bottom line.
+function withHud(base, C) {
+  const room = C - base.length - 2;
+  const caps = [];
+  let used = 0;
+  for (let i = S.keys.length - 1; i >= 0; i--) {
+    const w = S.keys[i].t.length + 3;
+    if (used + w > room) break;
+    used += w; caps.unshift(S.keys[i]);
+  }
+  if (!caps.length) return base;
+  const styled = caps.map((k) => (HUD_COLORS[k.m] || '\x1b[7m') + ' ' + k.t + ' \x1b[0m').join(' ');
+  return base + ' '.repeat(C - 1 - base.length - (used - 1)) + styled;
+}
+
 function inSel(y, x) {
   const [a, b] = order(S.anchor, { y: S.cy, x: S.cx });
   if (y < a.y || y > b.y) return false;
@@ -989,7 +1065,8 @@ function render() {
   const left = ` ${S.mode}${S.mode === 'VISUAL' && S.vline ? ' LINE' : ''}  [${cb + 1}/${B.length}] ${S.file || "[No Name]"}${S.dirty ? ' [+]' : ''}`;
   const right = `${S.count}${S.op || ''}  ${S.cy + 1}:${S.cx + 1}  ${Math.round(((S.cy + 1) / S.lines.length) * 100)}% `;
   rows.push('\x1b[7m' + (left + ' '.repeat(Math.max(1, C - left.length - right.length)) + right).slice(0, C) + '\x1b[0m');
-  rows.push((S.mode === 'COMMAND' ? ':' + S.cmd : S.mode === 'SEARCH' ? '/' + S.cmd : S.msg).slice(0, C - 1));
+  const base = (S.mode === 'COMMAND' ? ':' + S.cmd : S.mode === 'SEARCH' ? '/' + S.cmd : S.msg).slice(0, C - 1);
+  rows.push(S.hud ? withHud(base, C) : base);
 
   let cr, cc;
   if (T.focus && T.open) { cr = termCur.r; cc = termCur.c; }
@@ -1031,3 +1108,17 @@ function start() {
 }
 
 start();
+
+
+
+
+
+
+
+
+
+
+
+
+
+
