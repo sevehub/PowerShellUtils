@@ -15,10 +15,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 'use strict';
-// minivim.js - a tiny vim clone with a built-in terminal pane, tuned for PowerShell.
-// Zero dependencies. Usage: node minivim.js [file.ps1]
+// minivim.js - a tiny vim clone with a built-in terminal pane, for PowerShell and bash scripts.
+// Zero dependencies. Usage: node minivim.js [--shell=pwsh|bash] [file ...]
 
 const fs = require('fs');
 const os = require('os');
@@ -42,7 +41,7 @@ const S = {
 const T = {
   open: false, focus: false, h: 10, lines: [], partial: false,
   input: '', cur: 0, cwd: process.cwd(), proc: null, hist: [], hi: 0,
-  runStart: null,
+  runStart: null, shell: '',   // shell: 'pwsh' | 'bash' | '' (chosen on first use)
 };
 
 // ---------------------------------------------------------------- helpers
@@ -198,23 +197,28 @@ function parseRange(c) {
   return { has: true, y1: Math.min(a, b), y2: Math.max(a, b), rest: c.slice(m[0].length) };
 }
 
-// If the command does not mention $input itself, the range is piped into it.
-const wrapIn = (cmd) => (/\$input\b/i.test(cmd) ? cmd : '$input | ' + cmd);
+// PowerShell: the range is piped into the command unless it mentions $input itself. bash: stdin is the range.
+const wrapIn = (cmd) => (paneShell() === 'bash' || /\$input\b/i.test(cmd) ? cmd : '$input | ' + cmd);
 
 function runSync(cmd, input) {
-  const ps = psExe();
   const opts = { input, cwd: T.cwd, env: menv(), encoding: 'utf8', timeout: 30000, maxBuffer: 64 * 1024 * 1024 };
+  if (paneShell() === 'bash') {
+    if (!bashExe()) return { error: new Error('bash not found on PATH') };
+    return spawnSync('bash', ['-c', cmd], opts);
+  }
+  const ps = psExe();
   if (!ps) return spawnSync(cmd, { ...opts, shell: true });
-  const enc = process.platform === 'win32'
+  const enc = IS_WIN
     ? 'try{[Console]::InputEncoding=[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)}catch{};' : '';
   return spawnSync(ps, ['-NoLogo', '-NoProfile', ...EP, '-Command', enc + cmd], opts);
 }
 
-// Success only when the exit code is 0 and nothing was written to stderr.
+// Success needs exit code 0. PowerShell also requires an empty stderr; bash shows stderr in the pane as a warning.
 function syncResult(r) {
   if (r.error) return { err: r.error.code === 'ETIMEDOUT' ? 'Timed out after 30 s' : r.error.message };
   const e = (r.stderr || '').trim();
-  if (r.status !== 0 || e) return { err: e || `exit ${r.status}` };
+  if (r.status !== 0 || (e && paneShell() !== 'bash')) return { err: e || `exit ${r.status}` };
+  if (e) { T.open = true; for (const l of e.split(/\r?\n/)) T.lines.push(l); }
   let t = (r.stdout || '').replace(/\r\n/g, '\n').replace(/\t/g, '  ');
   if (t.endsWith('\n')) t = t.slice(0, -1);
   return { lines: t === '' && !(r.stdout || '').length ? [] : t.split('\n') };
@@ -227,7 +231,7 @@ function showErr(err) {
 }
 
 function filterRange(y1, y2, cmd) {
-  if (!cmd) { S.msg = 'Usage: :[range]!command   ($input holds the lines)'; return; }
+  if (!cmd) { S.msg = 'Usage: :[range]!command   (the lines arrive on stdin, or in $input for PowerShell)'; return; }
   S.msg = 'running...'; render();
   const res = syncResult(runSync(wrapIn(cmd), S.lines.slice(y1, y2 + 1).join('\n') + '\n'));
   if (res.err) { showErr(res.err); return; }
@@ -450,35 +454,12 @@ function feed(d) {
   render();
 }
 
-function killProc() {
-  const p = T.proc;
-  if (!p) return;
-  if (process.platform === 'win32') spawn('taskkill', ['/pid', String(p.pid), '/T', '/F']);
-  else p.kill('SIGINT');
-}
+// ---------------------------------------------------------------- shells (PowerShell and bash)
+const IS_WIN = process.platform === 'win32';
+const EP = IS_WIN ? ['-ExecutionPolicy', 'Bypass'] : [];
+let PS = null, BASH = null;
 
-function termRun(cmd) {
-  T.partial = false;
-  T.lines.push(`${shortCwd()}$ ${cmd}`);
-  if (!cmd.trim()) return;
-  const m = cmd.trim().match(/^(?:cd|sl|set-location)(?:\s+(.*))?$/i);
-  if (m) {
-    const d = path.resolve(T.cwd, (m[1] || os.homedir()).replace(/^["']|["']$/g, ''));
-    try { if (fs.statSync(d).isDirectory()) T.cwd = d; else T.lines.push('cd: not a directory'); }
-    catch { T.lines.push('cd: no such directory'); }
-    return;
-  }
-  if (cmd.trim() === 'clear' || cmd.trim() === 'cls') { T.lines = []; return; }
-  const ps = psExe();
-  const p = ps
-    ? spawn(ps, ['-NoLogo', '-NoProfile', ...EP, '-Command', cmd], { cwd: T.cwd, env: menv() })
-    : spawn(cmd, { shell: true, cwd: T.cwd, env: menv() });
-  attach(p);
-}
-
-// PowerShell executable: pwsh (7+) preferred, then Windows PowerShell; '' when none is found.
-const EP = process.platform === 'win32' ? ['-ExecutionPolicy', 'Bypass'] : [];
-let PS = null;
+// PowerShell: pwsh (7+) preferred, then Windows PowerShell; '' when none is found.
 function psExe() {
   if (PS !== null) return PS;
   PS = '';
@@ -491,6 +472,92 @@ function psExe() {
   return PS;
 }
 
+function bashExe() {
+  if (BASH !== null) return BASH;
+  BASH = '';
+  try { if (spawnSync('bash', ['-c', 'exit 0'], { stdio: 'ignore', timeout: 10000 }).status === 0) BASH = 'bash'; } catch {}
+  return BASH;
+}
+
+// The shell behind the pane and the filters: --shell=, :shell, the first file given, else the platform default.
+function paneShell() {
+  if (!T.shell) {
+    const order = IS_WIN ? ['pwsh', 'bash'] : ['bash', 'pwsh'];
+    T.shell = order.find((k) => (k === 'bash' ? bashExe() : psExe())) || order[0];
+  }
+  return T.shell;
+}
+
+// The shell that runs the buffer: by extension or shebang, '' when the file gives no hint.
+function fileKind() {
+  const f = S.file || '';
+  if (/\.(ps1|psm1|psd1)$/i.test(f) || /^#!.*\bpwsh\b/.test(S.lines[0] || '')) return 'pwsh';
+  return isShell() ? 'bash' : '';
+}
+
+// ---------------------------------------------------------------- bash session
+// One long-lived bash serves the pane, so cd, export, variables and functions persist between
+// commands. Each command is wrapped in { ...; } followed by a marker line that carries the exit
+// code and the working directory, which is how the end of a command is detected.
+const SH = { p: null, busy: false, buf: '', done: null };
+const shq = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+
+function shEnsure() {
+  if (SH.p) return;
+  const p = spawn(bashExe(), ['--norc', '--noprofile'], { cwd: T.cwd, env: menv() });
+  SH.p = p; SH.buf = '';
+  p.stdout.on('data', shOut);
+  p.stderr.on('data', shOut);
+  p.stdin.on('error', () => {});
+  p.on('error', (e) => { T.lines.push('error: ' + e.message); render(); });
+  p.on('close', () => {
+    if (SH.p !== p) return;
+    SH.p = null;
+    if (SH.busy) {
+      SH.busy = false; SH.done = null; T.proc = null; T.partial = false;
+      T.lines.push('[shell ended - a new one starts with the next command]');
+    }
+    render();
+  });
+  // stderr joins stdout so output stays in order; a trap keeps Ctrl-C from ending the session.
+  p.stdin.write('exec 2>&1; trap : INT\n');
+}
+
+function shOut(d) {
+  SH.buf += d.toString();
+  for (;;) {
+    const i = SH.buf.indexOf('\x01');
+    if (i < 0) { if (SH.buf) feed(SH.buf); SH.buf = ''; return; }
+    if (i > 0) { feed(SH.buf.slice(0, i)); SH.buf = SH.buf.slice(i); }
+    const m = /^\x01MV(\d+):([^\n]*)\n/.exec(SH.buf);
+    if (!m) { if (SH.buf.length > 4096) { feed(SH.buf); SH.buf = ''; } return; }
+    SH.buf = SH.buf.slice(m[0].length);
+    shDone(parseInt(m[1], 10), m[2]);
+  }
+}
+
+function shDone(code, cwd) {
+  SH.busy = false; T.proc = null; T.partial = false;
+  if (cwd) T.cwd = cwd;
+  if (code) T.lines.push(`[exit ${code}]`);
+  const cb = SH.done; SH.done = null;
+  if (cb) cb(code);
+  scanErrors();
+  render();
+}
+
+function shSend(cmd, onDone) {
+  if (!bashExe()) { S.msg = 'bash not found on PATH'; return false; }
+  if (T.proc) { S.msg = 'A command is still running (focus the pane, Ctrl-C)'; return false; }
+  shEnsure();
+  SH.busy = true; SH.done = onDone || null; T.proc = SH.p; T.partial = false;
+  const file = S.file ? path.resolve(S.file).replace(/\\/g, '/') : '';
+  const pre = `export MINIVIM_FILE=${shq(file)} MINIVIM_LINE=${S.cy + 1} MINIVIM_COL=${S.cx + 1}; `;
+  SH.p.stdin.write(`{ ${pre}${cmd}\n}; printf '\\001MV%d:%s\\n' "$?" "$(pwd -W 2>/dev/null || pwd)"\n`);
+  return true;
+}
+
+// ---------------------------------------------------------------- pane process control
 function attach(p, onDone) {
   T.proc = p;
   p.stdout.on('data', feed);
@@ -505,23 +572,82 @@ function attach(p, onDone) {
   });
 }
 
+// Ctrl-C. bash: interrupt the running command and keep the session (without pkill the session is replaced).
+function killProc() {
+  if (SH.busy && SH.p) {
+    const r = spawnSync('pkill', ['-INT', '-P', String(SH.p.pid)], { stdio: 'ignore' });
+    if (r.error || r.status !== 0) { try { SH.p.kill('SIGKILL'); } catch {} }
+    return;
+  }
+  const p = T.proc;
+  if (!p) return;
+  if (IS_WIN) spawn('taskkill', ['/pid', String(p.pid), '/T', '/F']);
+  else p.kill('SIGINT');
+}
+
+// Typed in the pane (or :!cmd).
+function termRun(cmd) {
+  T.partial = false;
+  T.lines.push(`${shortCwd()}$ ${cmd}`);
+  if (!cmd.trim()) return;
+  if (cmd.trim() === 'clear' || cmd.trim() === 'cls') { T.lines = []; return; }
+  T.runStart = null;
+  if (paneShell() === 'bash') { shSend(cmd); return; }
+  const m = cmd.trim().match(/^(?:cd|sl|set-location)(?:\s+(.*))?$/i);
+  if (m) {
+    const d = path.resolve(T.cwd, (m[1] || os.homedir()).replace(/^["']|["']$/g, ''));
+    try { if (fs.statSync(d).isDirectory()) T.cwd = d; else T.lines.push('cd: not a directory'); }
+    catch { T.lines.push('cd: no such directory'); }
+    return;
+  }
+  const ps = psExe();
+  const p = ps
+    ? spawn(ps, ['-NoLogo', '-NoProfile', ...EP, '-Command', cmd], { cwd: T.cwd, env: menv() })
+    : spawn(cmd, { shell: true, cwd: T.cwd, env: menv() });
+  attach(p);
+}
+
 function splitArgs(s) {
   return (s || '').match(/"[^"]*"|\S+/g)?.map((a) => a.replace(/^"|"$/g, '')) || [];
 }
 
-// Run the current buffer as a script. Saves first; output lands in the terminal pane.
-function runFile(args, mode) {   // mode: undefined = run, 'whatif' = dry run, 'confirm' = prompt per action
-  if (!S.file) { S.msg = 'No file name (use :w name.ps1 first)'; return; }
+// ---------------------------------------------------------------- running the buffer
+// Command prefix that runs the buffer in bash: bash by default, the shebang interpreter when it is not a shell.
+function interp(f) {
+  const m = /^#!\s*(\S+)(?:\s+(\S+))?/.exec(S.lines[0] || '');
+  if (m) {
+    const isEnv = path.basename(m[1]) === 'env';
+    const name = path.basename(isEnv ? m[2] || '' : m[1]);
+    if (name && !/^(ba|z|k|da|a)?sh$/.test(name)) return isEnv ? `env ${shq(m[2])} ${f}` : `${shq(m[1])} ${f}`;
+  }
+  return `bash ${f}`;
+}
+
+// Saves, then runs the buffer in the pane with the shell its type calls for.
+// mode - pwsh: undefined = run, 'whatif' = dry run, 'confirm' = prompt per action.
+//        bash: undefined = run, 'check' = bash -n + shellcheck (nothing executed), 'env' = run with DRY_RUN=1.
+function runFile(args, mode) {
+  if (!S.file) { S.msg = 'No file name (use :w name.ps1 or name.sh first)'; return; }
   if (T.proc) { S.msg = 'A process is still running (focus the pane, Ctrl-C)'; return; }
-  const ps = psExe();
-  if (!ps) { S.msg = 'PowerShell (pwsh or powershell) not found on PATH'; return; }
+  const kind = fileKind() || paneShell();
+  if (kind === 'bash' ? !bashExe() : !psExe()) { S.msg = (kind === 'bash' ? 'bash' : 'PowerShell (pwsh or powershell)') + ' not found on PATH'; return; }
   if (S.dirty && !save(S.file)) return;
   const abs = path.resolve(S.file);
+  const tags = kind === 'bash' ? { check: 'dryrun', env: 'dryrun -env' } : { whatif: 'dryrun -WhatIf', confirm: 'dryrun -Confirm' };
   T.open = true; T.partial = false;
-  const tag = mode === 'whatif' ? 'dryrun -WhatIf' : mode === 'confirm' ? 'dryrun -Confirm' : 'run';
-  T.lines.push(`${shortCwd()}$ ${tag} ${S.file}${args ? ' ' + args : ''}`);
+  T.lines.push(`${shortCwd()}$ ${tags[mode] || 'run'} ${S.file}${args && mode !== 'check' ? ' ' + args : ''}`);
   T.runStart = T.lines.length;
   S.errs = []; S.errI = -1;
+
+  if (kind === 'bash') {
+    const f = shq(abs.replace(/\\/g, '/'));
+    const cmd = mode === 'check'
+      ? `bash -n ${f} && echo '[bash -n: syntax ok]'; if command -v shellcheck >/dev/null 2>&1; then shellcheck -f gcc ${f} && echo '[shellcheck: no findings]'; else echo '[shellcheck not installed - only the syntax was checked]'; fi`
+      : `${mode === 'env' ? 'DRY_RUN=1 ' : ''}${interp(f)} ${args || ''}`;
+    if (shSend(cmd) && mode === 'env') S.msg = 'DRY_RUN=1 is set - the script must honor it, otherwise it runs for real';
+    return;
+  }
+
   let argv;
   if (mode) {
     // The preference variable is inherited by the script and by every cmdlet it calls,
@@ -531,8 +657,19 @@ function runFile(args, mode) {   // mode: undefined = run, 'whatif' = dry run, '
   } else {
     argv = ['-NoLogo', '-NoProfile', ...EP, '-File', abs, ...splitArgs(args)];
   }
-  attach(spawn(ps, argv, { cwd: T.cwd, env: menv() }), mode === 'whatif' ? whatIfSummary : undefined);
+  attach(spawn(psExe(), argv, { cwd: T.cwd, env: menv() }), mode === 'whatif' ? whatIfSummary : undefined);
   if (mode === 'confirm') T.focus = true;   // answers to the prompts are typed in the pane
+}
+
+// :dryrun - PowerShell: [-WhatIf|-Confirm] [args]; bash: [-env] [args].
+function dryRun(arg) {
+  if ((fileKind() || paneShell()) === 'bash') {
+    const m = /^-env(?:\s+(.*))?$/i.exec(arg);
+    runFile(m ? m[1] : arg, m ? 'env' : 'check');
+  } else {
+    const m = /^-(whatif|confirm)(?:\s+(.*))?$/i.exec(arg);
+    runFile(m ? m[2] : arg, m && m[1].toLowerCase() === 'confirm' ? 'confirm' : 'whatif');
+  }
 }
 
 function whatIfSummary() {
@@ -542,21 +679,29 @@ function whatIfSummary() {
     : '[dry run finished: no "What if:" lines seen - the script may not use cmdlets that support -WhatIf, so it may have no preview]');
 }
 
-// PowerShell reports locations as "At <file>:<line> char:<col>".
+// Error locations from the last run: bash "file: line N:", shellcheck -f gcc "file:N:C: severity:",
+// PowerShell "At file:N char:C".
 function scanErrors() {
   if (T.runStart == null) return;
-  const re = /At (.+?):(\d+) char:(\d+)/;
   S.errs = [];
+  const seen = new Set();
   for (const l of T.lines.slice(T.runStart)) {
-    const m = re.exec(l);
-    if (m) S.errs.push({ file: m[1], y: +m[2] - 1, x: +m[3] - 1 });
+    let m = /^(.+?): line (\d+):/.exec(l), col = 0;
+    if (!m) { m = /^(.+?):(\d+):(\d+): (?:error|warning|note)/.exec(l); if (m) col = +m[3] - 1; }
+    if (!m) { m = /At (.+?):(\d+) char:(\d+)/.exec(l); if (m) col = +m[3] - 1; }
+    if (!m) continue;
+    const file = path.resolve(T.cwd, m[1]);
+    const key = file + ':' + m[2];
+    if (seen.has(key) || !fs.existsSync(file)) continue;
+    seen.add(key);
+    S.errs.push({ file, y: +m[2] - 1, x: Math.max(0, col) });
   }
   T.runStart = null; S.errI = -1;
   S.msg = S.errs.length ? `${S.errs.length} error location(s) - :cn / :cp to jump` : '';
 }
 
 function sameFile(a, b) {
-  const n = (f) => (process.platform === 'win32' ? path.resolve(f).toLowerCase() : path.resolve(f));
+  const n = (f) => (IS_WIN ? path.resolve(f).toLowerCase() : path.resolve(f));
   return !!a && !!b && n(a) === n(b);
 }
 
@@ -676,11 +821,13 @@ function exCmd(c) {
       } else toggleHud(arg === 'on' ? true : arg === 'off' ? false : undefined);
       return;
     case 'run': runFile(arg); return;
-    case 'dryrun': case 'dry': {
-      const m = /^-(whatif|confirm)(?:\s+(.*))?$/i.exec(arg);
-      runFile(m ? m[2] : arg, m && m[1].toLowerCase() === 'confirm' ? 'confirm' : 'whatif');
+    case 'dryrun': case 'dry': dryRun(arg); return;
+    case 'shell':
+      if (arg === 'pwsh' || arg === 'bash') {
+        if (T.proc) { S.msg = 'A process is still running'; return; }
+        T.shell = arg; S.msg = 'pane shell: ' + arg;
+      } else S.msg = 'pane shell: ' + paneShell() + '  (:shell pwsh|bash)';
       return;
-    }
     case 'cn': errJump(1); return;
     case 'cp': errJump(-1); return;
     case 'syntax': case 'syn': S.syn = arg === 'off' ? false : arg === 'on' ? true : null; return;
@@ -862,7 +1009,7 @@ function onKey(k) {
   if (S.mode !== 'COMMAND' && S.mode !== 'SEARCH') S.msg = '';
   if (k === 'F2') { toggleHud(); return; }
   if (S.hud && !(T.focus && T.open)) hudPush(k);   // pane keystrokes are never recorded
-  if (k === 'F5' || k === 'F6') { if (S.mode === 'INSERT') { S.mode = 'NORMAL'; clamp(); } runFile('', k === 'F6' ? 'whatif' : undefined); return; }
+  if (k === 'F5' || k === 'F6') { if (S.mode === 'INSERT') { S.mode = 'NORMAL'; clamp(); } if (k === 'F6') dryRun(''); else runFile(''); return; }
   if (k === 'C-w') { if (T.open) T.focus = !T.focus; else S.msg = 'No terminal open (:term)'; return; }
   if (T.focus && T.open) return termKey(k);
   switch (S.mode) {
@@ -1007,6 +1154,74 @@ function psColors(line, inBlock) {
   return { col, inBlock };
 }
 
+const SH_KW = new Set(['if', 'then', 'else', 'elif', 'fi', 'for', 'while', 'until', 'do', 'done', 'case', 'esac', 'in',
+  'function', 'select', 'time', 'coproc']);
+const SH_OPEN = new Set(['if', 'then', 'else', 'elif', 'do', 'while', 'until', 'time', '{', '!']);  // a command follows
+const SH_BI = new Set(['echo', 'cd', 'export', 'local', 'readonly', 'declare', 'typeset', 'unset', 'set', 'shift', 'return',
+  'exit', 'source', '.', 'eval', 'exec', 'read', 'printf', 'test', 'trap', 'alias', 'let', 'break', 'continue', 'pushd',
+  'popd', 'wait', 'kill', 'umask', 'getopts', 'shopt', 'command', 'builtin', 'type', 'mapfile', 'readarray']);
+
+function isShell() {
+  const f = S.file || '';
+  if (/\.(sh|bash|zsh|ksh|bats)$/i.test(f) || /(^|[\\/])(\.bashrc|\.bash_profile|\.bash_aliases|\.profile|\.zshrc|PKGBUILD)$/.test(f)) return true;
+  return /^#!.*\b(ba|z|k|da|a)?sh\b/.test(S.lines[0] || '');
+}
+
+// Per-character colour codes for one shell line. st carries an open heredoc ({term, strip}) across lines.
+function shColors(line, st) {
+  const col = new Array(line.length).fill('');
+  if (st) {
+    col.fill(C_GREEN);
+    return { col, inBlock: (st.strip ? line.trim() : line) === st.term ? false : st };
+  }
+  let heredoc = false, cmdPos = true, i = 0;
+  while (i < line.length) {
+    const c = line[i], rest = line.slice(i);
+    if (c === '\\') { i += 2; continue; }
+    if (c === '#' && (i === 0 || /[\s;&|(]/.test(line[i - 1]))) { col.fill(C_GRAY, i); break; }
+    if (c === "'") {
+      const j = line.indexOf("'", i + 1), e = j < 0 ? line.length : j + 1;
+      col.fill(C_GREEN, i, e); i = e; cmdPos = false; continue;
+    }
+    if (c === '"') {
+      let j = i + 1;
+      while (j < line.length && line[j] !== '"') { if (line[j] === '\\') j++; j++; }
+      const e = Math.min(line.length, j + 1);
+      col.fill(C_GREEN, i, e);
+      const re = /\$(?:\{[^}]*\}|\(|[A-Za-z_]\w*|[0-9@*#?!$-])/g, inner = line.slice(i, e);
+      let m;
+      while ((m = re.exec(inner))) col.fill(C_CYAN, i + m.index, i + m.index + m[0].length);
+      i = e; cmdPos = false; continue;
+    }
+    if (c === '$') {
+      const m = /^\$(?:\{[^}]*\}|\(\(?|[A-Za-z_]\w*|[0-9@*#?!$-])/.exec(rest);
+      if (m) { col.fill(C_CYAN, i, i + m[0].length); i += m[0].length; cmdPos = false; continue; }
+    }
+    if (c === '`') { col.fill(C_YELLOW, i, i + 1); i++; continue; }
+    if (c === '<' && line[i + 1] === '<' && line[i + 2] !== '<') {
+      const m = /^<<(-?)\s*(['"]?)([A-Za-z_]\w*)\2/.exec(rest);
+      if (m) { heredoc = { term: m[3], strip: !!m[1] }; col.fill(C_MAGENTA, i, i + m[0].length); i += m[0].length; continue; }
+    }
+    if (/[;&|(]/.test(c)) { cmdPos = true; i++; continue; }
+    if (/\s/.test(c)) { i++; continue; }
+    const m = /^[^\s;&|()<>'"$`#\\]+/.exec(rest);
+    if (!m) { i++; continue; }
+    const w = m[0];
+    const asg = /^[A-Za-z_]\w*\+?=/.exec(w);
+    if (asg && cmdPos) { col.fill(C_CYAN, i, i + asg[0].length); i += asg[0].length; continue; }   // NAME=value, then keep scanning
+    if (SH_KW.has(w) && cmdPos) { col.fill(C_MAGENTA, i, i + w.length); cmdPos = SH_OPEN.has(w); }
+    else if (w === '{') { cmdPos = true; }
+    else if (w === '[[' || w === ']]' || w === '[' || w === ']') { col.fill(C_YELLOW, i, i + w.length); cmdPos = false; }
+    else if (SH_BI.has(w) && cmdPos) { col.fill(C_YELLOW, i, i + w.length); cmdPos = false; }
+    else if (/^--?[A-Za-z]/.test(w) && !cmdPos) { col.fill(C_BLUE, i, i + w.length); }
+    else if (/^\d+$/.test(w)) { col.fill(C_RED, i, i + w.length); cmdPos = false; }
+    else if (SH_OPEN.has(w)) { cmdPos = true; }
+    else { cmdPos = false; }
+    i += w.length;
+  }
+  return { col, inBlock: heredoc };
+}
+
 // Compose syntax colours with the visual-mode selection (inverse video).
 function paint(y, seg, cols) {
   let o = '', prev = '';
@@ -1035,16 +1250,18 @@ function render() {
 
   const rows = [];
   if (bl) rows.push(bufLine(C));
-  const syn = S.syn === null ? /\.(ps1|psm1|psd1)$/i.test(S.file || '') : S.syn;
+  const kind = fileKind();
+  const syn = S.syn === null ? !!kind : S.syn;
+  const colorize = kind === 'bash' ? shColors : psColors;
   let blk = false;
-  if (syn && S.lines.length <= 5000) for (let y = 0; y < S.top; y++) blk = psColors(S.lines[y], blk).inBlock;
+  if (syn && S.lines.length <= 5000) for (let y = 0; y < S.top; y++) blk = colorize(S.lines[y], blk).inBlock;
   for (let i = 0; i < eh; i++) {
     const y = S.top + i;
     if (y >= S.lines.length) { rows.push('\x1b[34m~\x1b[0m'); continue; }
     const num = String(y + 1).padStart(gw - 1) + ' ';
     const seg = S.lines[y].slice(S.left, S.left + tw);
     let cols = [];
-    if (syn) { const r = psColors(S.lines[y], blk); cols = r.col; blk = r.inBlock; }
+    if (syn) { const r = colorize(S.lines[y], blk); cols = r.col; blk = r.inBlock; }
     rows.push('\x1b[90m' + num + '\x1b[0m' + paint(y, seg, cols));
   }
 
@@ -1082,15 +1299,19 @@ function cleanup() {
   if (cleaned) return;
   cleaned = true;
   try { if (T.proc) killProc(); } catch {}
+  try { if (SH.p) SH.p.kill('SIGKILL'); } catch {}
   try { out.write('\x1b[0m\x1b[?25h\x1b[?1049l'); } catch {}
   try { inp.setRawMode(false); } catch {}
 }
 
 function start() {
   if (!inp.isTTY) { console.error('minivim needs an interactive terminal'); process.exit(1); }
-  const files = process.argv.slice(2);
-  if (files.length) { load(files[0]); for (const f of files.slice(1)) openFile(f); bufGo(0); }
-  else S.msg = 'minivim - :q quit  :w save  F5/:run script  :%!cmd filter  :term  Ctrl-W focus';
+  const args = process.argv.slice(2);
+  const sh = args.find((a) => /^--shell=(bash|pwsh)$/.test(a));
+  if (sh) T.shell = sh.slice(8);
+  const files = args.filter((a) => !a.startsWith('--'));
+  if (files.length) { load(files[0]); if (!T.shell) T.shell = fileKind(); for (const f of files.slice(1)) openFile(f); bufGo(0); }
+  else S.msg = 'minivim - :q quit  :w save  F5/:run script  F6 dry run  :%!cmd filter  :term  Ctrl-W focus';
   out.write('\x1b[?1049h');
   inp.setRawMode(true);
   inp.setEncoding('utf8');
@@ -1108,17 +1329,6 @@ function start() {
 }
 
 start();
-
-
-
-
-
-
-
-
-
-
-
 
 
 

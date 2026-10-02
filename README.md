@@ -11,7 +11,12 @@ Browsers and SmartScreen commonly block or warn on downloaded `.js` files, so th
 
 
 ```powershell
-irm https://github.com/sevehub/PowerShellUtils/minivim.js -OutFile minivim.js
+irm https://raw.githubusercontent.com/sevehub/PowerShellUtils/refs/heads/main/minivim.js -OutFile minivim.js
+node minivim.js script.ps1
+```
+
+```bash
+wget https://raw.githubusercontent.com/sevehub/PowerShellUtils/refs/heads/main/minivim.js 
 node minivim.js script.ps1
 ```
 
@@ -44,6 +49,14 @@ The current version has known limitations. The terminal pane uses plain pipes in
 
 Planned work depends on feedback and may include a real terminal through the optional `node-pty` package, text objects, dot-repeat, and a single-executable build. Issues and suggestions are welcome.
 
+## BASH - POWERSHELL
+The shell is chosen per file type. Files ending in .ps1, .psm1, or .psd1 (or with a pwsh shebang) run in PowerShell, and files ending in .sh, .bash, .zsh, or .ksh, common dotfiles, or files with a shell shebang run in bash, so F5 and :dryrun follow the buffer being edited. The terminal pane and the filters use one default shell, taken from --shell=pwsh|bash, otherwise from the first file given, otherwise from the platform (PowerShell on Windows, bash elsewhere), and :shell pwsh|bash switches it while running. Syntax highlighting also follows the file type. The bash side needs bash on the PATH (Linux, macOS, WSL, or Git Bash on Windows).
+
+In bash mode the pane is backed by one long-lived bash session, so cd, export, variables, and functions persist between commands, and input typed in the pane reaches a running command, which allows read prompts to be answered. Ctrl-C interrupts the running command and keeps the session when pkill is available; otherwise the session is replaced and its state is lost. Programs that wait for end-of-input cannot be ended with Ctrl-D, and aliases and .bashrc are not loaded because the session is non-interactive. Filters send the range to the command on stdin (:%!sort -u, :'<,'>!jq .), the exit code must be zero for the buffer to change, and stderr from a successful command appears in the pane as a warning. Scripts can read $MINIVIM_FILE, $MINIVIM_LINE, and $MINIVIM_COL in both shells.
+
+For bash scripts :dryrun (or F6) is a check that executes nothing: it runs bash -n for syntax errors and then shellcheck -f gcc when shellcheck is installed, and the findings are reachable with :cn and :cp. :dryrun -env [args] instead runs the script with DRY_RUN=1 exported, which is a simulation only if the script itself checks that variable, and a script that ignores it runs for real. Bash error messages of the form file: line N: are collected as locations in the same way as PowerShell errors.
+
+For PowerShell scripts that change things, a dry run is available. :dryrun (or F6) runs the current script with $WhatIfPreference set to true, so every cmdlet that supports -WhatIf (Remove-Item, Move-Item, Set-Content, Stop-Process, and similar) reports what it would do instead of doing it, and a summary line counts the simulated actions. This works even when the script does not declare SupportsShouldProcess, because the preference variable is inherited by the script and the cmdlets it calls. :dryrun -Confirm runs the script for real but sets $ConfirmPreference to Low, so PowerShell asks before each action, and the pane takes focus so the answers (Y, A, N) can be typed there. Any remaining text is passed to the script as arguments in PowerShell syntax, for example :dryrun -WhatIf -Path .\\invoices. A dry run only covers cmdlets that support -WhatIf; native programs such as robocopy, .NET method calls like [IO.File]::Delete(), and plain redirection are executed normally, so a script that relies on them is not safe to treat as simulated.
 
 ## HUD
 
