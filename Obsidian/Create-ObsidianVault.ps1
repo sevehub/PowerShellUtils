@@ -65,8 +65,11 @@ $Folders = @(
 )
 
 # 30_Zettelkasten follows the Index Card notebook: eight nodes, N1 to N8.
-# One note per card side, named like the printed reference (N3-14F, N3-14R), created when used.
+# One note per card side, named like the printed reference (N3-14F, N3-14R).
+# The notes are created when needed, with the Index Card plugin, so none starts as "Untitled".
 $Folders += (1..8 | ForEach-Object { "30_Zettelkasten/N$_" })
+# Attachments get the same eight node subfolders (Attachments/N1 to N8).
+$Folders += (1..8 | ForEach-Object { "Attachments/N$_" })
 
 if (!(Test-Path $RootPath)) {
     try {
@@ -133,8 +136,8 @@ This vault was created via PowerShell to ensure 1:1 alignment with Vim.
 - Use ``00_Inbox`` for raw thoughts.
 - Use ``10_Blog`` for your Typst-Vim9Script pipeline.
 - Use ``20_AI_Worklog/Weekly`` for the AI Work Log tally, one note per ISO week.
-- Use ``30_Zettelkasten/N1`` to ``N8`` for the Index Card notebook nodes. One note per card side, named like the printed reference: ``N3-14F`` for the front and ``N3-14R`` for the reverse. The Graph view colours each node folder.
-- Store all images in ``Attachments``.
+- Use ``30_Zettelkasten/N1`` to ``N8`` for the Index Card notebook nodes. One note per card side, named like the printed reference: ``N3-14F`` for the front and ``N3-14R`` for the reverse. Create them with the Index Card plugin (command: New card). The Graph view colours each node folder.
+- Store images in ``Attachments``, or in ``Attachments/N1`` to ``N8`` when they belong to a card of that node.
 
 ## Weekly note setup
 Settings > Core plugins > enable Daily notes, then set:
@@ -144,8 +147,6 @@ Settings > Core plugins > enable Daily notes, then set:
 
 Run the command "Open today's note". The first call in a week creates the note, for example 2026-W42.md, and later calls open the same file.
 
-## Alignment Check
-This is a standard Markdown paragraph. No bullets here, so it will look exactly the same in Vim and Obsidian.
 "@
     Write-Utf8NoBom -Path $WelcomeFile -Content $WelcomeContent
 }
