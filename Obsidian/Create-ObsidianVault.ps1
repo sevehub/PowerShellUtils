@@ -57,15 +57,16 @@ Write-Host "Target Location: $RootPath" -ForegroundColor White
 # ---------- folder structure ----------
 $Folders = @(
     "00_Inbox",              # Quick notes, raw thoughts, unsorted ideas
-    "10_Blog/Drafts",        # Dedicated Blog area: Vim -> Typst pipeline
-    "10_Blog/Published",     # Posts that are live
+    "10_Blog",               # Dedicated Blog area: Vim -> Typst pipeline
     "20_AI_Worklog/Weekly",  # One note per ISO week, created by Obsidian (YYYY-Www.md)
-    "30_Knowledge",          # Permanent Zettelkasten/Wiki/Atlas
     "40_Projects",           # Active projects
-    "50_Archive",            # Completed projects and old notes
     "Attachments",           # Images, PDFs, and assets
     "Templates"              # Reusable Markdown structures
 )
+
+# 30_Zettelkasten follows the Index Card notebook: eight nodes, N1 to N8.
+# One note per card side, named like the printed reference (N3-14F, N3-14R), created when used.
+$Folders += (1..8 | ForEach-Object { "30_Zettelkasten/N$_" })
 
 if (!(Test-Path $RootPath)) {
     try {
@@ -85,6 +86,21 @@ foreach ($Folder in $Folders) {
         New-Item -ItemType Directory -Path $FolderPath -Force | Out-Null
         Write-Host "  [+] Created: $Folder" -ForegroundColor Green
     }
+}
+
+# ---------- graph view colour groups, one per Zettelkasten node (never overwritten) ----------
+$GraphFile = Join-Path $RootPath ".obsidian/graph.json"
+if (!(Test-Path $GraphFile)) {
+    $Palette = "E69F00","56B4E9","009E73","F0E442","0072B2","D55E00","CC79A7","999999"
+    $Groups = for ($n = 1; $n -le 8; $n++) {
+        [ordered]@{
+            query = "path:30_Zettelkasten/N$n/"
+            color = [ordered]@{ a = 1; rgb = [Convert]::ToInt32($Palette[$n - 1], 16) }
+        }
+    }
+    New-Item -ItemType Directory -Path (Split-Path $GraphFile) -Force | Out-Null
+    Write-Utf8NoBom -Path $GraphFile -Content ([ordered]@{ colorGroups = @($Groups) } | ConvertTo-Json -Depth 5)
+    Write-Host "  [+] Created: .obsidian/graph.json (8 node colour groups)" -ForegroundColor Green
 }
 
 # ---------- weekly template (never overwritten) ----------
@@ -115,8 +131,9 @@ This vault was created via PowerShell to ensure 1:1 alignment with Vim.
 
 ## Quick Start
 - Use ``00_Inbox`` for raw thoughts.
-- Use ``10_Blog/Drafts`` for your Typst-Vim9Script pipeline, and ``10_Blog/Published`` for live posts.
+- Use ``10_Blog`` for your Typst-Vim9Script pipeline.
 - Use ``20_AI_Worklog/Weekly`` for the AI Work Log tally, one note per ISO week.
+- Use ``30_Zettelkasten/N1`` to ``N8`` for the Index Card notebook nodes. One note per card side, named like the printed reference: ``N3-14F`` for the front and ``N3-14R`` for the reverse. The Graph view colours each node folder.
 - Store all images in ``Attachments``.
 
 ## Weekly note setup
